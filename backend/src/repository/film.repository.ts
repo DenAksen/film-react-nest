@@ -3,10 +3,12 @@ import {
   NotFoundException,
   ConflictException,
 } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
-import { FilmDocument, ScheduleItem } from './film.schema';
-import { FilmDto } from 'src/films/dto/films.dto';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { Film } from '../entities/film.entity';
+import { Schedule } from '../entities/schedule.entity';
+import { FilmDto, FilmWithScheduleDto } from 'src/films/dto/films.dto';
+import { ScheduleItem } from '../films/dto/films.dto';
 
 export interface ApiListResponse<T> {
   total: number;
@@ -16,22 +18,41 @@ export interface ApiListResponse<T> {
 @Injectable()
 export class FilmRepository {
   constructor(
-    @InjectModel(FilmDocument.name) private filmModel: Model<FilmDocument>,
+    @InjectRepository(Film)
+    private readonly filmRepository: Repository<Film>,
+    @InjectRepository(Schedule)
+    private readonly scheduleRepository: Repository<Schedule>,
   ) {}
 
+  // Получить все фильмы (без расписания)
   async findAll(): Promise<ApiListResponse<FilmDto>> {
-    const films = await this.filmModel.find();
-    const items = films.map((film) => ({
-      id: film.id,
-      rating: film.rating,
-      director: film.director,
-      tags: film.tags,
-      image: film.image,
-      cover: film.cover,
-      title: film.title,
-      about: film.about,
-      description: film.description,
-    }));
+    const films = await this.filmRepository.find();
+    const items = films.map((film) => {
+      let tags: string[] = [];
+
+      // Является ли tags JSON массивом
+      if (film.tags) {
+        try {
+          const parsed = JSON.parse(film.tags);
+          tags = Array.isArray(parsed) ? parsed : [film.tags];
+        } catch {
+          // Если не JSON, то используем как обычную строку
+          tags = [film.tags];
+        }
+      }
+
+      return {
+        id: film.id,
+        rating: film.rating,
+        director: film.director,
+        tags: tags,
+        image: film.image,
+        cover: film.cover,
+        title: film.title,
+        about: film.about,
+        description: film.description,
+      };
+    });
 
     return {
       total: items.length,
@@ -39,55 +60,79 @@ export class FilmRepository {
     };
   }
 
-  async findFilmById(id: string) {
-    const film = await this.filmModel.findOne({ id }).exec();
+  // Получить фильм по ID с расписанием
+  async findFilmById(id: string): Promise<FilmWithScheduleDto> {
+    const film = await this.filmRepository.findOne({
+      where: { id },
+    });
 
     if (!film) {
       throw new NotFoundException(`Film with id ${id} not found`);
     }
 
-    // Формируем ответ с сеансами
-    const schedule = film.schedule.map((s) => ({
+    const schedules = await this.scheduleRepository.find({
+      where: { filmId: id },
+    });
+
+    // Парсим tags
+    let tags: string[] = [];
+    if (film.tags) {
+      try {
+        const parsed = JSON.parse(film.tags);
+        tags = Array.isArray(parsed) ? parsed : [film.tags];
+      } catch {
+        tags = [film.tags];
+      }
+    }
+
+    const schedule = schedules.map((s) => ({
       id: s.id,
       daytime: s.daytime,
       hall: s.hall,
       rows: s.rows,
       seats: s.seats,
       price: s.price,
-      taken: s.taken || [],
+      taken: s.taken ? JSON.parse(s.taken) : [],
     }));
 
     return {
       id: film.id,
       rating: film.rating,
       director: film.director,
-      tags: film.tags,
+      tags: tags,
       image: film.image,
       cover: film.cover,
       title: film.title,
       about: film.about,
       description: film.description,
-      schedule, // ← добавляем расписание
+      schedule,
     };
   }
 
+  // Получить все сеансы фильма
   async findSchedulesByFilmId(
     id: string,
   ): Promise<ApiListResponse<ScheduleItem>> {
-    const film = await this.filmModel.findOne({ id }).exec();
+    const film = await this.filmRepository.findOne({
+      where: { id },
+    });
 
     if (!film) {
       throw new NotFoundException(`Film with id ${id} not found`);
     }
 
-    const items = film.schedule.map((schedule) => ({
+    const schedules = await this.scheduleRepository.find({
+      where: { filmId: id },
+    });
+
+    const items = schedules.map((schedule) => ({
       id: schedule.id,
       daytime: schedule.daytime,
       hall: schedule.hall,
       rows: schedule.rows,
       seats: schedule.seats,
       price: schedule.price,
-      taken: schedule.taken || [],
+      taken: schedule.taken ? JSON.parse(schedule.taken) : [],
     }));
 
     return {
@@ -96,29 +141,64 @@ export class FilmRepository {
     };
   }
 
-  async getScheduleItem(filmId: string, scheduleId: string): Promise<any> {
-    const film = await this.filmModel.findOne({ id: filmId }).exec();
+  // Получить конкретный сеанс по ID фильма и ID сеанса
+  async getScheduleItem(
+    filmId: string,
+    scheduleId: string,
+  ): Promise<ScheduleItem> {
+    // Существует ли фильм
+    const film = await this.filmRepository.findOne({
+      where: { id: filmId },
+    });
 
     if (!film) {
       throw new NotFoundException(`Film with id ${filmId} not found`);
     }
 
-    const schedule = film.schedule.find((s) => s.id === scheduleId);
+    // Найдем сеанс
+    const schedule = await this.scheduleRepository.findOne({
+      where: { id: scheduleId, filmId },
+    });
 
     if (!schedule) {
       throw new NotFoundException(`Schedule with id ${scheduleId} not found`);
     }
 
-    return schedule;
+    return {
+      id: schedule.id,
+      daytime: schedule.daytime,
+      hall: schedule.hall,
+      rows: schedule.rows,
+      seats: schedule.seats,
+      price: schedule.price,
+      taken: schedule.taken ? JSON.parse(schedule.taken) : [],
+    };
   }
 
+  // Проверить доступность мест
   async checkSeatsAvailability(
     filmId: string,
     scheduleId: string,
     seats: string[],
   ): Promise<{ available: boolean; takenSeats: string[] }> {
-    const schedule = await this.getScheduleItem(filmId, scheduleId);
-    const currentTaken = schedule.taken || [];
+    const schedule = await this.scheduleRepository.findOne({
+      where: { id: scheduleId, filmId },
+    });
+
+    if (!schedule) {
+      throw new NotFoundException(`Schedule with id ${scheduleId} not found`);
+    }
+
+    // Парсим строку в массив
+    let currentTaken: string[] = [];
+    if (schedule.taken) {
+      try {
+        currentTaken = JSON.parse(schedule.taken);
+      } catch {
+        currentTaken = [];
+      }
+    }
+
     const takenSeats = seats.filter((seat) => currentTaken.includes(seat));
 
     return {
@@ -127,6 +207,7 @@ export class FilmRepository {
     };
   }
 
+  // Забронировать места
   async bookSeats(
     filmId: string,
     scheduleId: string,
@@ -134,20 +215,15 @@ export class FilmRepository {
   ): Promise<void> {
     const uniqueSeats = [...new Set(seats)];
 
-    // Находим фильм
-    const film = await this.filmModel.findOne({ id: filmId }).exec();
-    if (!film) {
-      throw new NotFoundException(`Film with id ${filmId} not found`);
-    }
+    const schedule = await this.scheduleRepository.findOne({
+      where: { id: scheduleId, filmId },
+    });
 
-    // Находим сеанс
-    const scheduleIndex = film.schedule.findIndex((s) => s.id === scheduleId);
-    if (scheduleIndex === -1) {
+    if (!schedule) {
       throw new NotFoundException(`Schedule with id ${scheduleId} not found`);
     }
 
-    // Проверяем конфликты
-    const currentTaken = film.schedule[scheduleIndex].taken || [];
+    const currentTaken = JSON.parse(schedule.taken || '[]');
     const conflicting = uniqueSeats.filter((seat) =>
       currentTaken.includes(seat),
     );
@@ -157,11 +233,10 @@ export class FilmRepository {
         `Seats ${conflicting.join(', ')} are already taken`,
       );
     }
-
     // Бронируем
-    await this.filmModel.updateOne(
-      { id: filmId, 'schedule.id': scheduleId },
-      { $addToSet: { 'schedule.$.taken': { $each: uniqueSeats } } },
-    );
+    const newTaken = [...currentTaken, ...uniqueSeats];
+    await this.scheduleRepository.update(scheduleId, {
+      taken: JSON.stringify(newTaken),
+    });
   }
 }
