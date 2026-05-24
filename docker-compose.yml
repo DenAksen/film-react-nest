@@ -1,0 +1,90 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: films_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-student}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-student123}
+      POSTGRES_DB: ${DB_NAME:-films}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - films_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-student}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    container_name: films_backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_DRIVER: ${DATABASE_DRIVER:-postgres}
+      DATABASE_URL: postgres://${DB_USER:-student}:${DB_PASSWORD:-student123}@postgres:5432/${DB_NAME:-films}
+      LOG_FORMAT: json
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - films_network
+
+  frontend-builder:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: /api/afisha
+        VITE_CDN_URL: /content/afisha
+    container_name: films_frontend_builder
+    volumes:
+      - frontend_dist:/dist
+    networks:
+      - films_network
+
+  nginx:
+    build: ./nginx
+    container_name: films_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - frontend_dist:/usr/share/nginx/html:ro
+    depends_on:
+      - backend
+      - frontend-builder
+    networks:
+      - films_network
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: films_pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@films.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    ports:
+      - "8080:80"
+    networks:
+      - films_network
+    depends_on:
+      - postgres
+
+volumes:
+  postgres_data:
+    name: films_postgres_data
+  pgadmin_data:
+    name: films_pgadmin_data
+  frontend_dist:
+    name: films_frontend_dist
+
+networks:
+  films_network:
+    name: films_network
+    driver: bridge
