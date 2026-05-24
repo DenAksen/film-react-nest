@@ -31,6 +31,6 @@ MongoDB должна быть установлена и запущена.
 
 Для проверки отправьте тестовый запрос с помощью Postman или `curl`.
 
-
+Ссылка на сайт: http://aksenovpr.students.nomorepartiessite.ru
 
 
